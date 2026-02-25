@@ -1,128 +1,114 @@
 import os
-import json
-from typing import List, Optional
-
+from typing import List
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
-from openai import OpenAI
+
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import JsonOutputParser
 
 load_dotenv()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-API_KEY = os.getenv("OPENAI_API_KEY")
-if not API_KEY:
-    raise RuntimeError("OPENAI_API_KEY is missing. Put it in .env or environment variables.")
+app = FastAPI(title="Cambodia AI Server", version="1.0.0")
 
-client = OpenAI(api_key=API_KEY)
-
-app = FastAPI(title="Cambodia AI Server", version="0.3.0")
-
-
-# =========
-# DTO
-# =========
 class SuperSearchRequest(BaseModel):
     content: str = Field(..., min_length=1)
-
 
 class ThemeSearchRequest(BaseModel):
     theme: str = Field(..., min_length=1)
 
+class TravelItem(BaseModel):
+    title: str = Field(description="여행지 이름")
+    content: str = Field(description="2~4문장 추천 이유/팁")
+    location: str = Field(description="국가/도시/지역")
+    sources: List[str] = Field(description="참고자료 링크 2~5개")
 
-SYSTEM_COMMON = (
-    "너는 여행지 추천 AI다. 반드시 JSON 배열로만 응답해라. "
-    "각 원소는 다음 키를 가진다:\n"
-    "- title: string (여행지 이름)\n"
-    "- content: string (2~4문장 추천 이유/팁)\n"
-    "- location: string (국가/도시/지역)\n"
-    "- sources: string[] (참고자료 링크 2~5개)\n\n"
-    "sources는 광고/블로그보다 '공식/권위/대형 가이드/공공기관/지도/유네스코' 우선.\n"
-    "응답에 JSON 외의 텍스트를 절대 포함하지 마라."
+class TravelResponse(BaseModel):
+    results: List[TravelItem]
+
+
+parser = JsonOutputParser(pydantic_object=TravelResponse)
+
+llm = ChatOpenAI(
+    model="gpt-4o-mini",
+    temperature=0.3,
+    api_key=OPENAI_API_KEY,
 )
 
-SYSTEM_SUPER = SYSTEM_COMMON + " 사용자의 요구를 충족하는 추천을 만들어라."
-SYSTEM_THEME = SYSTEM_COMMON + " 주어진 테마에 맞는 추천을 만들어라."
-SYSTEM_RECOMMEND = SYSTEM_COMMON + " 대중적으로 만족도가 높은 여행지 추천을 만들어라."
+prompt_template = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            """
+            너는 여행지 추천 AI다.
+            반드시 지정된 JSON 형식으로만 응답해야 한다.
+            
+            조건:
+            - 여행지 최대 5개
+            - sources는 2~5개
+            - 공식/권위/대형 가이드/공공기관/유네스코 우선
 
+            {format_instructions}
+            """,
+        ),
+        (
+            "user",
+            "{user_input}",
+        ),
+    ]
+)
 
-def _ask_json(system_prompt: str, user_prompt: str, max_items: int = 5) -> List[dict]:
-    resp = client.chat.completions.create(
-        model="gpt-4o-mini",
-        temperature=0.7,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-            {"role": "user", "content": f"추천은 {max_items}개 이내."},
-            {"role": "user", "content": "응답은 JSON 배열만. 다른 텍스트 금지."},
-        ],
-    )
+def run_chain(user_input: str):
 
-    text = resp.choices[0].message.content.strip()
+    chain_input = {
+        "user_input": user_input,
+        "format_instructions": parser.get_format_instructions(),
+    }
 
-    # ```json ... ``` 제거
-    if text.startswith("```"):
-        parts = text.split("```")
-        if len(parts) >= 2:
-            text = parts[1].strip()
-            if text.lower().startswith("json"):
-                text = text[4:].strip()
+    chain = prompt_template | llm | parser
 
-    try:
-        data = json.loads(text)
-        if not isinstance(data, list):
-            raise ValueError("Not a JSON array")
-
-        cleaned = []
-        for item in data[:max_items]:
-            if not isinstance(item, dict):
-                continue
-            sources = item.get("sources", [])
-            if not isinstance(sources, list):
-                sources = []
-            sources = [str(s).strip() for s in sources[:5] if str(s).strip()]
-
-            cleaned.append(
-                {
-                    "title": str(item.get("title", "")).strip(),
-                    "content": str(item.get("content", "")).strip(),
-                    "location": str(item.get("location", "")).strip(),
-                    "sources": sources,
-                }
-            )
-        return cleaned
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"AI response is not valid JSON: {e}. raw={text[:400]}..."
-        )
-
+    return chain.invoke(chain_input)
 
 @app.post("/search/super")
-def super_search(req: SuperSearchRequest):
-    prompt = (
-        "사용자 요청:\n"
-        f"{req.content}\n\n"
-        "요청에 맞게 여행지를 추천하고, 각 추천마다 관련 참고자료 링크(sources) 2~5개를 포함해라."
-    )
-    return _ask_json(SYSTEM_SUPER, prompt, max_items=5)
+async def super_search(req: SuperSearchRequest):
+    try:
+        user_prompt = f"""
+        사용자 요청:
+        {req.content}
+        요구에 맞는 여행지를 추천하라.
+        """
+        return run_chain(user_prompt)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/search/theme")
-def theme_search(req: ThemeSearchRequest):
-    prompt = (
-        f"테마: {req.theme}\n\n"
-        "테마에 맞게 여행지를 추천하고, 각 추천마다 관련 참고자료 링크(sources) 2~5개를 포함해라."
-    )
-    return _ask_json(SYSTEM_THEME, prompt, max_items=5)
+async def theme_search(req: ThemeSearchRequest):
+    try:
+        user_prompt = f"""
+        테마:
+        {req.theme}
+        테마에 맞는 여행지를 추천하라.
+        """
+        return run_chain(user_prompt)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/recommend")
-def recommend():
-    prompt = (
-        "대중적으로 만족도가 높은 여행지 5개 추천. "
-        "각 추천마다 관련 참고자료 링크(sources) 2~5개 포함."
-    )
-    return _ask_json(SYSTEM_RECOMMEND, prompt, max_items=5)
+async def recommend():
+    try:
+        user_prompt = """
+        대중적으로 만족도가 높은 여행지 5개 추천.
+        """
+        return run_chain(user_prompt)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/health")
