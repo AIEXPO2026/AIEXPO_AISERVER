@@ -28,6 +28,22 @@ class TravelItem(BaseModel):
 class TravelResponse(BaseModel):
     results: List[TravelItem]
 
+class DailyPlanRequest(BaseModel):
+    location: str = Field(..., description="여행 도시 또는 지역")
+    start_time: str = Field(..., description="여행 시작 시간 예: 10:00")
+    end_time: str = Field(..., description="여행 종료 시간 예: 18:00")
+
+
+class PlanItem(BaseModel):
+    time: str = Field(description="시간")
+    activity: str = Field(description="활동 내용")
+
+
+class DailyPlanResponse(BaseModel):
+    plan: List[PlanItem]
+
+
+daily_parser = JsonOutputParser(pydantic_object=DailyPlanResponse)
 
 parser = JsonOutputParser(pydantic_object=TravelResponse)
 
@@ -60,6 +76,32 @@ prompt_template = ChatPromptTemplate.from_messages(
     ]
 )
 
+daily_prompt_template = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            """
+            너는 여행 일정 생성 AI다.
+            하루 여행 일정을 시간 기반으로 만들어라.
+
+            규칙
+            - 시간 순서로 정렬
+            - 장소 이동을 고려한 자연스러운 일정
+            - 너무 촘촘하지 않게 구성
+            - 점심 식사 포함
+
+            반드시 JSON 형식으로 응답
+
+            {format_instructions}
+            """,
+        ),
+        (
+            "user",
+            "{user_input}",
+        ),
+    ]
+)
+
 def run_chain(user_input: str):
 
     chain_input = {
@@ -68,6 +110,17 @@ def run_chain(user_input: str):
     }
 
     chain = prompt_template | llm | parser
+
+    return chain.invoke(chain_input)
+
+def run_daily_plan_chain(user_input: str):
+
+    chain_input = {
+        "user_input": user_input,
+        "format_instructions": daily_parser.get_format_instructions(),
+    }
+
+    chain = daily_prompt_template | llm | daily_parser
 
     return chain.invoke(chain_input)
 
@@ -110,6 +163,23 @@ async def recommend():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/plan/daily")
+async def daily_plan(req: DailyPlanRequest):
+    try:
+        user_prompt = f"""
+        여행 도시: {req.location}
+        
+        여행 시간:
+        시작 {req.start_time}
+        종료 {req.end_time}
+
+        이 시간 안에 가능한 하루 여행 일정을 만들어라.
+        """
+
+        return run_daily_plan_chain(user_prompt)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")
 def health():
