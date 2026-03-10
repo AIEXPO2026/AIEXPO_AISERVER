@@ -1,5 +1,6 @@
 import os
 from typing import List
+import requests
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
@@ -10,8 +11,10 @@ from langchain_core.output_parsers import JsonOutputParser
 
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
 
-app = FastAPI(title="Cambodia AI Server", version="1.0.0")
+app = FastAPI(title="Cambodia AI Server", version="1.1.0")
+
 
 class SuperSearchRequest(BaseModel):
     content: str = Field(..., min_length=1)
@@ -19,19 +22,26 @@ class SuperSearchRequest(BaseModel):
 class ThemeSearchRequest(BaseModel):
     theme: str = Field(..., min_length=1)
 
+
+class CourseRequest(BaseModel):
+    location: str = Field(..., description="현재 위치 또는 시작 여행지 예: 후쿠오카 타워")
+
+
+class DailyPlanRequest(BaseModel):
+    location: str = Field(..., description="여행 도시 또는 지역")
+    start_time: str = Field(..., description="여행 시작 시간 예: 10:00")
+    end_time: str = Field(..., description="여행 종료 시간 예: 18:00")
+
+
 class TravelItem(BaseModel):
     title: str = Field(description="여행지 이름")
     content: str = Field(description="2~4문장 추천 이유/팁")
     location: str = Field(description="국가/도시/지역")
     sources: List[str] = Field(description="참고자료 링크 2~5개")
 
+
 class TravelResponse(BaseModel):
     results: List[TravelItem]
-
-class DailyPlanRequest(BaseModel):
-    location: str = Field(..., description="여행 도시 또는 지역")
-    start_time: str = Field(..., description="여행 시작 시간 예: 10:00")
-    end_time: str = Field(..., description="여행 종료 시간 예: 18:00")
 
 
 class PlanItem(BaseModel):
@@ -43,9 +53,18 @@ class DailyPlanResponse(BaseModel):
     plan: List[PlanItem]
 
 
-daily_parser = JsonOutputParser(pydantic_object=DailyPlanResponse)
+class CourseItem(BaseModel):
+    order: int = Field(description="방문 순서")
+    place: str = Field(description="장소 이름")
+
+
+class CourseResponse(BaseModel):
+    course: List[CourseItem]
+
 
 parser = JsonOutputParser(pydantic_object=TravelResponse)
+daily_parser = JsonOutputParser(pydantic_object=DailyPlanResponse)
+course_parser = JsonOutputParser(pydantic_object=CourseResponse)
 
 llm = ChatOpenAI(
     model="gpt-4o-mini",
@@ -60,7 +79,7 @@ prompt_template = ChatPromptTemplate.from_messages(
             """
             너는 여행지 추천 AI다.
             반드시 지정된 JSON 형식으로만 응답해야 한다.
-            
+
             조건:
             - 여행지 최대 5개
             - sources는 2~5개
@@ -84,13 +103,38 @@ daily_prompt_template = ChatPromptTemplate.from_messages(
             너는 여행 일정 생성 AI다.
             하루 여행 일정을 시간 기반으로 만들어라.
 
-            규칙
+            규칙:
             - 시간 순서로 정렬
             - 장소 이동을 고려한 자연스러운 일정
             - 너무 촘촘하지 않게 구성
             - 점심 식사 포함
+            - 반드시 JSON 형식으로만 응답
 
-            반드시 JSON 형식으로 응답
+            {format_instructions}
+            """,
+        ),
+        (
+            "user",
+            "{user_input}",
+        ),
+    ]
+)
+
+course_prompt_template = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            """
+            너는 위치 기반 여행 코스 생성 AI다.
+            사용자가 입력한 현재 위치 또는 시작 여행지를 기준으로,
+            주변 관광지 후보를 참고해서 자연스러운 여행 코스를 만들어라.
+
+            규칙:
+            - 방문 순서는 1부터 시작
+            - 현재 위치와 가까운 장소부터 자연스럽게 이어지도록 구성
+            - 중복 장소 금지
+            - course는 최대 4개로 구성
+            - 반드시 JSON 형식으로만 응답
 
             {format_instructions}
             """,
@@ -103,26 +147,60 @@ daily_prompt_template = ChatPromptTemplate.from_messages(
 )
 
 def run_chain(user_input: str):
-
     chain_input = {
         "user_input": user_input,
         "format_instructions": parser.get_format_instructions(),
     }
-
     chain = prompt_template | llm | parser
-
     return chain.invoke(chain_input)
 
 def run_daily_plan_chain(user_input: str):
-
     chain_input = {
         "user_input": user_input,
         "format_instructions": daily_parser.get_format_instructions(),
     }
-
     chain = daily_prompt_template | llm | daily_parser
-
     return chain.invoke(chain_input)
+
+
+def run_course_chain(user_input: str):
+    chain_input = {
+        "user_input": user_input,
+        "format_instructions": course_parser.get_format_instructions(),
+    }
+    chain = course_prompt_template | llm | course_parser
+    return chain.invoke(chain_input)
+
+
+def get_nearby_places(location: str) -> List[str]:
+    if not GOOGLE_MAPS_API_KEY:
+        raise HTTPException(status_code=500, detail="GOOGLE_MAPS_API_KEY가 설정되지 않았습니다.")
+
+    url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
+    params = {
+        "query": f"tourist attractions near {location}",
+        "key": GOOGLE_MAPS_API_KEY,
+        "language": "ko",
+    }
+
+    response = requests.get(url, params=params, timeout=10)
+    data = response.json()
+
+    status = data.get("status")
+    if status not in ["OK", "ZERO_RESULTS"]:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Google Places API 오류: {status}"
+        )
+
+    places = []
+    for item in data.get("results", [])[:8]:
+        name = item.get("name")
+        if name and name not in places:
+            places.append(name)
+
+    return places
+
 
 @app.post("/search/super")
 async def super_search(req: SuperSearchRequest):
@@ -133,7 +211,6 @@ async def super_search(req: SuperSearchRequest):
         요구에 맞는 여행지를 추천하라.
         """
         return run_chain(user_prompt)
-
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -147,7 +224,6 @@ async def theme_search(req: ThemeSearchRequest):
         테마에 맞는 여행지를 추천하라.
         """
         return run_chain(user_prompt)
-
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -159,7 +235,6 @@ async def recommend():
         대중적으로 만족도가 높은 여행지 5개 추천.
         """
         return run_chain(user_prompt)
-
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -168,16 +243,36 @@ async def daily_plan(req: DailyPlanRequest):
     try:
         user_prompt = f"""
         여행 도시: {req.location}
-        
+
         여행 시간:
         시작 {req.start_time}
         종료 {req.end_time}
 
         이 시간 안에 가능한 하루 여행 일정을 만들어라.
         """
-
         return run_daily_plan_chain(user_prompt)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.post("/course/location")
+async def create_course(req: CourseRequest):
+    try:
+        places = get_nearby_places(req.location)
+
+        if not places:
+            raise HTTPException(status_code=404, detail="주변 장소를 찾지 못했습니다.")
+
+        user_prompt = f"""
+        현재 위치: {req.location}
+
+        주변 장소 후보:
+        {places}
+
+        위 장소들을 활용해서 자연스러운 여행 코스를 만들어라.
+        첫 장소는 가능하면 현재 위치 또는 가장 대표적인 장소로 구성하라.
+        """
+        return run_course_chain(user_prompt)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
