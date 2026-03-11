@@ -35,6 +35,13 @@ Base = declarative_base()
 app = FastAPI(title="Cambodia AI Server", version="1.1.0")
 
 
+class Member(Base):
+    __tablename__ = "member"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    nickname = Column(String(255), unique=True, nullable=False)
+
+
 class Travel(Base):
     __tablename__ = "travel"
 
@@ -75,7 +82,7 @@ class CourseRequest(BaseModel):
 
 
 class SaveCourseRequest(BaseModel):
-    member_id: int = Field(..., description="회원 ID")
+    nickname: str = Field(..., description="회원 닉네임 (JWT sub 값)")
     location: str = Field(..., description="현재 위치 또는 시작 여행지 예: 후쿠오카 타워")
 
 
@@ -301,6 +308,17 @@ def get_nearby_places(location: str) -> List[str]:
     return places
 
 
+def get_member_id_by_nickname(nickname: str) -> int:
+    db: Session = SessionLocal()
+    try:
+        member = db.query(Member).filter(Member.nickname == nickname).first()
+        if not member:
+            raise HTTPException(status_code=404, detail=f"회원을 찾을 수 없습니다: {nickname}")
+        return member.id
+    finally:
+        db.close()
+
+
 def save_course_to_db(member_id: int, course_items: List[dict]) -> int:
     db: Session = SessionLocal()
 
@@ -460,7 +478,8 @@ async def create_and_save_course(req: SaveCourseRequest):
         첫 장소는 가능하면 현재 위치 또는 가장 대표적인 장소로 구성하라.
         """
         course_result = run_course_chain(user_prompt)
-        travel_id = save_course_to_db(req.member_id, course_result["course"])
+        member_id = get_member_id_by_nickname(req.nickname)
+        travel_id = save_course_to_db(member_id, course_result["course"])
 
         return {
             "travel_id": travel_id,
