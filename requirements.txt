@@ -1,9 +1,17 @@
 fastapi
-uvicorn[standard]
-pydantic
+uvicorn
+requests
 python-dotenv
+pydantic
+pydantic-settings
+sqlalchemy
+pymysql
+langchain
 langchain-openai
+<<<<<<< HEAD
 langchain-core
 requests
 sqlalchemy
 pymysql
+=======
+>>>>>>> 21b5431 (refactor: remove DB-based course storage and switch to request-driven customize course API)
