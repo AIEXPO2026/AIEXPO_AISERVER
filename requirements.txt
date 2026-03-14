@@ -8,7 +8,4 @@ sqlalchemy
 pymysql
 langchain
 langchain-openai
-<<<<<<< HEAD
 langchain-core
-=======
->>>>>>> 1dacf7c (refactor: constrain travel recommendations to requested destination scope)
