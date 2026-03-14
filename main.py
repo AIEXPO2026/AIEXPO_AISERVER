@@ -1,10 +1,8 @@
-
 import os
-from typing import List, Optional
+from typing import List, Optional, Dict
 
-import requests
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from langchain_openai import ChatOpenAI
@@ -14,17 +12,20 @@ from langchain_core.output_parsers import JsonOutputParser
 load_dotenv()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
 
-app = FastAPI(title="Cambodia AI Server", version="1.3.0")
+app = FastAPI(title="Cambodia AI Server", version="1.4.0")
 
 
 class SuperSearchRequest(BaseModel):
     content: str = Field(..., min_length=1)
+    country: str = Field(..., min_length=1, description="국가/지역/도시/섬/관광지")
+    searchEngine: str = Field(..., min_length=1)
 
 
 class ThemeSearchRequest(BaseModel):
     theme: str = Field(..., min_length=1)
+    country: Optional[str] = None
+    searchEngine: Optional[str] = None
 
 
 class CourseRequest(BaseModel):
@@ -80,6 +81,16 @@ class CourseResponse(BaseModel):
     course: List[CourseItem]
 
 
+class SearchEngineItem(BaseModel):
+    code: str
+    label: str
+
+
+class SearchEngineListResponse(BaseModel):
+    country: str
+    engines: List[SearchEngineItem]
+
+
 parser = JsonOutputParser(pydantic_object=TravelResponse)
 daily_parser = JsonOutputParser(pydantic_object=DailyPlanResponse)
 course_parser = JsonOutputParser(pydantic_object=CourseResponse)
@@ -102,6 +113,13 @@ prompt_template = ChatPromptTemplate.from_messages(
             - 여행지 최대 5개
             - sources는 2~5개
             - 공식/권위/대형 가이드/공공기관/유네스코 우선
+            - 사용자의 요청, 여행 대상 지역, 검색엔진 성향을 반영할 것
+            - 근거 없는 과장 금지
+            - 사용자가 입력한 여행 대상 범위를 절대 벗어나지 말 것
+            - 입력값이 국가가 아니라 지역, 도시, 섬, 관광지여도 그대로 해당 범위 안에서만 추천할 것
+            - 예를 들어 독도가 입력되면 서울, 부산, 제주처럼 먼 지역은 절대 추천하지 말 것
+            - 추천 가능한 장소가 적은 좁은 지역이면 같은 범위 안에서 세부 스팟, 관람 포인트, 방문 방식, 시간대 추천으로 구성할 것
+            - 입력 범위를 억지로 더 큰 행정구역 전체로 확장하지 말 것
 
             {format_instructions}
             """,
@@ -139,7 +157,7 @@ course_prompt_template = ChatPromptTemplate.from_messages(
             """
             너는 위치 기반 여행 코스 생성 AI다.
             사용자가 입력한 현재 위치 또는 시작 여행지를 기준으로,
-            주변 관광지 후보를 참고해서 자연스러운 여행 코스를 만들어라.
+            일반적인 관광 동선과 대표 명소를 참고해서 자연스러운 여행 코스를 만들어라.
 
             규칙:
             - 방문 순서는 1부터 시작
@@ -180,6 +198,41 @@ customize_prompt_template = ChatPromptTemplate.from_messages(
     ]
 )
 
+COUNTRY_SEARCH_ENGINES: Dict[str, List[Dict[str, str]]] = {
+    "대한민국": [
+        {"code": "naver", "label": "네이버"},
+        {"code": "google", "label": "구글"},
+        {"code": "bing", "label": "빙"},
+    ],
+    "일본": [
+        {"code": "google", "label": "구글"},
+        {"code": "yahoo", "label": "야후 재팬"},
+        {"code": "bing", "label": "빙"},
+    ],
+    "미국": [
+        {"code": "google", "label": "구글"},
+        {"code": "bing", "label": "빙"},
+        {"code": "duckduckgo", "label": "덕덕고"},
+    ],
+    "대만": [
+        {"code": "google", "label": "구글"},
+        {"code": "bing", "label": "빙"},
+    ],
+    "태국": [
+        {"code": "google", "label": "구글"},
+        {"code": "bing", "label": "빙"},
+    ],
+    "프랑스": [
+        {"code": "google", "label": "구글"},
+        {"code": "bing", "label": "빙"},
+    ],
+}
+
+DEFAULT_ENGINES = [
+    {"code": "google", "label": "구글"},
+    {"code": "bing", "label": "빙"},
+]
+
 
 def run_chain(user_input: str):
     chain = prompt_template | llm | parser
@@ -213,42 +266,65 @@ def run_customize_course_chain(user_input: str):
     })
 
 
-def get_nearby_places(location: str) -> List[str]:
-    if not GOOGLE_MAPS_API_KEY:
-        raise HTTPException(status_code=500, detail="GOOGLE_MAPS_API_KEY가 설정되지 않았습니다.")
+def get_country_engines(country: str) -> List[Dict[str, str]]:
+    return COUNTRY_SEARCH_ENGINES.get(country, DEFAULT_ENGINES)
 
-    url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
-    params = {
-        "query": f"tourist attractions near {location}",
-        "key": GOOGLE_MAPS_API_KEY,
-        "language": "ko",
+
+def get_search_engine_style(search_engine: str) -> str:
+    if search_engine == "naver":
+        return "로컬 인기 스팟과 맛집 중심"
+    if search_engine == "google":
+        return "대표 관광지와 랜드마크 중심"
+    if search_engine == "bing":
+        return "감성적인 명소와 사진 스팟 중심"
+    if search_engine == "yahoo":
+        return "대중적인 관광지와 지역 명소 중심"
+    if search_engine == "duckduckgo":
+        return "균형 잡힌 탐색형 추천"
+    return "균형 잡힌 여행지 추천"
+
+
+@app.get("/search/engines", response_model=SearchEngineListResponse)
+async def search_engines(country: str = Query(..., min_length=1)):
+    engines = get_country_engines(country)
+    return {
+        "country": country,
+        "engines": engines,
     }
-
-    response = requests.get(url, params=params, timeout=10)
-    data = response.json()
-
-    status = data.get("status")
-    if status not in ["OK", "ZERO_RESULTS"]:
-        raise HTTPException(status_code=500, detail=f"Google Places API 오류: {status}")
-
-    places = []
-    for item in data.get("results", [])[:8]:
-        name = item.get("name")
-        if name and name not in places:
-            places.append(name)
-
-    return places
 
 
 @app.post("/search/super")
 async def super_search(req: SuperSearchRequest):
     try:
+        style_hint = get_search_engine_style(req.searchEngine)
+
         user_prompt = f"""
         사용자 요청:
         {req.content}
-        요구에 맞는 여행지를 추천하라.
+
+        여행 대상:
+        {req.country}
+
+        사용자가 선택한 검색엔진:
+        {req.searchEngine}
+
+        검색엔진 성향:
+        {style_hint}
+
+        중요 규칙:
+        - 여행 대상이 독도처럼 좁은 범위이면 반드시 독도 범위 안에서만 추천
+        - 다른 도시나 다른 광역 지역으로 확장 금지
+        - 추천 장소 수가 부족하면 같은 지역 안의 세부 포인트, 감상 포인트, 이동 방식, 시간대 팁 중심으로 구성
+
+        위 정보를 바탕으로 여행지를 추천하라.
         """
-        return run_chain(user_prompt)
+        result = run_chain(user_prompt)
+        result["_meta"] = {
+            "country": req.country,
+            "searchEngine": req.searchEngine,
+            "styleHint": style_hint,
+        }
+        return result
     except HTTPException:
         raise
     except Exception as e:
@@ -258,10 +334,29 @@ async def super_search(req: SuperSearchRequest):
 @app.post("/search/theme")
 async def theme_search(req: ThemeSearchRequest):
     try:
+        style_hint = ""
+        if req.searchEngine:
+            style_hint = get_search_engine_style(req.searchEngine)
+
         user_prompt = f"""
         테마:
         {req.theme}
-        테마에 맞는 여행지를 추천하라.
+
+        여행 대상:
+        {req.country if req.country else "미지정"}
+
+        사용자가 선택한 검색엔진:
+        {req.searchEngine if req.searchEngine else "미지정"}
+
+        검색엔진 성향:
+        {style_hint if style_hint else "기본 추천"}
+
+        중요 규칙:
+        - 입력된 여행 대상 범위를 절대 벗어나지 말 것
+        - 대상이 좁은 지역이면 그 안의 세부 스팟과 활동 중심으로 추천할 것
+        - 다른 도시로 임의 확장 금지
+
+        테마와 조건에 맞는 여행지를 추천하라.
         """
         return run_chain(user_prompt)
     except HTTPException:
@@ -303,18 +398,10 @@ async def daily_plan(req: DailyPlanRequest):
 @app.post("/course/location")
 async def create_course(req: CourseRequest):
     try:
-        places = get_nearby_places(req.location)
-
-        if not places:
-            raise HTTPException(status_code=404, detail="주변 장소를 찾지 못했습니다.")
-
         user_prompt = f"""
-        현재 위치: {req.location}
+        현재 위치 또는 시작 여행지: {req.location}
 
-        주변 장소 후보:
-        {places}
-
-        위 장소들을 활용해서 자연스러운 여행 코스를 만들어라.
+        위 위치를 기준으로 일반적인 관광 동선에 맞는 자연스러운 여행 코스를 만들어라.
         첫 장소는 가능하면 현재 위치 또는 가장 대표적인 장소로 구성하라.
         """
         return run_course_chain(user_prompt)
