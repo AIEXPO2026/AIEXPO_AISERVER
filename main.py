@@ -96,7 +96,7 @@ daily_parser = JsonOutputParser(pydantic_object=DailyPlanResponse)
 course_parser = JsonOutputParser(pydantic_object=CourseResponse)
 
 llm = ChatOpenAI(
-    model="gpt-4o-mini",
+    model="gpt-5.4",
     temperature=0.3,
     api_key=OPENAI_API_KEY,
 )
