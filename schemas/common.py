@@ -6,6 +6,11 @@ class CourseRequest(BaseModel):
     location: str = Field(..., description="현재 위치 또는 시작 여행지 예: 후쿠오카 타워")
 
 
+class CourseSaveRequest(BaseModel):
+    nickname: str = Field(..., min_length=1)
+    location: str = Field(..., min_length=1, description="현재 위치 또는 시작 여행지")
+
+
 class TravelContextRequest(BaseModel):
     moods: List[int] = Field(default_factory=list)
     peopleCounts: List[int] = Field(default_factory=list)

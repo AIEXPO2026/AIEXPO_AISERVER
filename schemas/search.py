@@ -4,8 +4,8 @@ from pydantic import BaseModel, Field
 
 class SuperSearchRequest(BaseModel):
     content: str = Field(..., min_length=1)
-    country: str = Field(..., min_length=1, description="국가/지역/도시/섬/관광지")
-    searchEngine: str = Field(..., min_length=1)
+    country: Optional[str] = Field(None, description="국가/지역/도시/섬/관광지")
+    searchEngine: Optional[str] = None
 
 
 class ThemeSearchRequest(BaseModel):

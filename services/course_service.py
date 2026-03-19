@@ -18,15 +18,19 @@ def create_course_by_location(location: str):
     return invoke_chain(course_prompt_template, course_parser, user_prompt)
 
 
+def save_course_by_location(nickname: str, location: str):
+    result = create_course_by_location(location)
+    result["nickname"] = nickname
+    result["location"] = location
+    return result
+
+
 def customize_course_by_member(
     member_id: int,
     style: str,
     saved_places: list[str],
     travel_context: TravelContextRequest | None = None,
 ):
-    if not saved_places:
-        raise HTTPException(status_code=400, detail="savedPlaces는 최소 1개 이상 필요합니다.")
-
     travel_context_text = ""
     if travel_context:
         travel_context_text = f"""
@@ -42,7 +46,7 @@ def customize_course_by_member(
     사용자 ID: {member_id}
 
     해당 사용자가 기존에 저장한 여행 코스:
-    {saved_places}
+    {saved_places if saved_places else "없음"}
 
     선택한 여행 스타일:
     {style}
