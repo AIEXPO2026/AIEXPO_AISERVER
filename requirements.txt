@@ -1,6 +1,7 @@
 fastapi
 uvicorn
 requests
+httpx
 python-dotenv
 pydantic
 pydantic-settings
@@ -9,3 +10,5 @@ pymysql
 langchain
 langchain-openai
 langchain-core
+redis
+cachetools
