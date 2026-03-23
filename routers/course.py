@@ -1,10 +1,9 @@
 from fastapi import APIRouter, HTTPException
 
-from schemas.common import CourseRequest, CourseSaveRequest, CustomizeCourseRequest
+from schemas.common import CourseRequest, CustomizeCourseRequest
 from services.course_service import (
     create_course_by_location,
-    save_course_by_location,
-    customize_course_by_member,
+    customize_course,
 )
 
 router = APIRouter()
@@ -20,21 +19,10 @@ async def create_course(req: CourseRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/location/save")
-async def save_course(req: CourseSaveRequest):
+@router.post("/customize")
+async def customize_course_api(req: CustomizeCourseRequest):
     try:
-        return save_course_by_location(req.nickname, req.location)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/customize/member/{member_id}")
-async def customize_course(member_id: int, req: CustomizeCourseRequest):
-    try:
-        return customize_course_by_member(
-            member_id=member_id,
+        return customize_course(
             style=req.style,
             saved_places=req.savedPlaces,
             travel_context=req.travelContext,
